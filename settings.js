@@ -28,8 +28,8 @@ global.my = {
 	yt: process.env.MY_YOUTUBE || 'https://youtube.com/@efkidgamer',
 	gh: process.env.MY_GITHUB || 'https://github.com/efkidgamerdev',
 	gc: process.env.MY_GROUP || 'https://whatsapp.com/channel/0029VbBMv2IDeON5eOz38p1M',
-	ch: process.env.MY_CHANNEL || '120363319098372999@newsletter',
-	web: process.env.MY_WEBSITE || 'frankkaumba. gamer',
+	ch: process.env.MY_CHANNEL || '120363423961368163@newsletter',
+	web: process.env.MY_WEBSITE || 'frankkaumba.gamer.gd',
 	email: process.env.MY_EMAIL || 'efkidgamer@gmail.com'
 }
 
@@ -83,7 +83,7 @@ global.chatLength = 1000;
 
 // EF-PRIME Features
 global.features = {
-	autoread: process.env.AUTO_READ === 'true',
+	autoread: process.env.AUTO_READ === 'false',
 	publicMode: process.env.PUBLIC_MODE === 'true',
 	antilink: true,
 	antispam: true,
