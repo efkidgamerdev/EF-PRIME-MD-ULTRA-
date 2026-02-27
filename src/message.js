@@ -813,12 +813,16 @@ async function Serialize(qasim, msg, store, groupCache) {
 	// ✅ FIX: Ensure baileys exports are ready (needed for getContentType, extractMessageContent etc)
 	await initBaileys();
 	// ✅ FIX: v7 — user.lid is now a real field from creds.me.lid — guard it safely
-	// ✅ FIX v7: qasim.user.lid comes from creds.me.lid e.g. "145917739024404:93@lid"
-	// decodeJid strips the :93 device suffix → "145917739024404@lid"
-	const botLid = qasim.user?.lid
-		? qasim.decodeJid(qasim.user.lid)
-		: (qasim.user?.id?.includes('@lid') ? qasim.decodeJid(qasim.user.id) : null);
-	const botNumber = qasim.decodeJid(qasim.user.id);
+	// ✅ FIX v7: Derive bot identifiers robustly.
+	// qasim.user.id  may be a PN JID  e.g. "265993702468@s.whatsapp.net"
+	//                or a LID         e.g. "145917739024404:93@lid"
+	// qasim.user.lid is the LID       e.g. "145917739024404:93@lid" (may have :device suffix)
+	const botNumber = qasim.decodeJid(qasim.user.id)
+	// Build botLid: prefer explicit user.lid, fall back to user.id if it IS a lid
+	const _rawLid = qasim.user?.lid || (qasim.user?.id?.includes('@lid') ? qasim.user.id : null)
+	const botLid = _rawLid ? qasim.decodeJid(_rawLid) : null
+	// Also keep the raw phone number so we can match against any JID format
+	const _botPhone = botNumber.split(':')[0].split('@')[0]
 	const m = { ...msg };
 	if (!m) return m
 	if (m.key) {
@@ -838,21 +842,32 @@ async function Serialize(qasim, msg, store, groupCache) {
 			}
 			m.metadata = metadata
 			m.admins = m.metadata.participants ? (m.metadata.participants.reduce((a, b) => (b.admin ? a.push({ id: b.id, admin: b.admin }) : [...a]) && a, [])) : []
-			// ✅ FIX v7: sender/participant IDs in groups may now be LIDs — check both id and lid fields
-			m.isAdmin = m.admins?.some((b) => {
-				if (b.id === m.sender) return true
-				const full = m.metadata.participants?.find(p => p.id === b.id)
-				return full?.lid === m.sender
+			// ✅ FIX v7: isAdmin — match by raw phone number to bypass LID/PN format differences
+			const _senderNum = m.sender?.split(':')[0].split('@')[0]
+			m.isAdmin = !!m.metadata.participants?.find((p) => {
+				if (!p.admin) return false
+				const pNum = p.id?.split(':')[0].split('@')[0]
+				const pLidNum = p.lid?.split(':')[0].split('@')[0]
+				return pNum === _senderNum || pLidNum === _senderNum
 			}) || false
 			m.participant = m.key.participant
-			// ✅ FIX v7: isBotAdmin fails because group participant IDs are now LIDs in v7.
-			// Must match botNumber (PN JID) OR botLid against both participant.id and participant.lid.
-			m.isBotAdmin = !!m.admins?.find((member) => {
-				if (botNumber && member.id === botNumber) return true
-				if (botLid && member.id === botLid) return true
-				const full = m.metadata.participants?.find(p => p.id === member.id)
-				if (full?.lid && botLid && full.lid === botLid) return true
-				if (full?.lid && botNumber && full.lid === botNumber) return true
+			// ✅ FIX v7: isBotAdmin — exhaustive LID/PN matching
+			// In v7, group participants are stored as LIDs. The bot's own entry may be
+			// stored by LID, PN, or have a separate .lid field. We check every combination.
+			const _botLidClean = botLid ? botLid.split(':')[0].split('@')[0] : null
+			const _botPnClean = botNumber ? botNumber.split(':')[0].split('@')[0] : null
+			m.isBotAdmin = !!m.metadata.participants?.find((p) => {
+				if (!p.admin) return false
+				// Extract raw number from whatever format this participant is stored as
+				const pNum = p.id?.split(':')[0].split('@')[0]
+				const pLidNum = p.lid?.split(':')[0].split('@')[0]
+				// Match bot's PN number against participant id or lid number
+				if (_botPnClean && (pNum === _botPnClean || pLidNum === _botPnClean)) return true
+				// Match bot's LID number against participant id or lid number
+				if (_botLidClean && (pNum === _botLidClean || pLidNum === _botLidClean)) return true
+				// Full JID exact match fallbacks
+				if (botNumber && (p.id === botNumber || p.lid === botNumber)) return true
+				if (botLid && (p.id === botLid || p.lid === botLid)) return true
 				return false
 			}) || false
 		}
