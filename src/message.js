@@ -11,14 +11,9 @@ const PhoneNumber = require('awesome-phonenumber');
 const { checkStatus } = require('./database');
 const { imageToWebp, videoToWebp, writeExif, gifToWebp } = require('../lib/exif');
 const { isUrl, getGroupAdmins, generateMessageTag, getBuffer, getSizeMedia, fetchJson, sleep, getTypeUrlMedia } = require('../lib/function');
-// ✅ FIX: Baileys v7 is ESM-only — cannot use require(). Load once and cache.
-let _baileys = null;
-const getBaileys = async () => {
-    if (!_baileys) _baileys = await import('@whiskeysockets/baileys');
-    return _baileys;
-};
-
-// These are needed synchronously in some places — will be populated on first async call
+// ✅ FIX v7: Baileys is ESM-only. Use a lazy getter so it's loaded from the
+// already-resolved ESM cache (index.js loads it first) without race conditions.
+// Frankkaumbadev 🦾
 let jidNormalizedUser, proto, getBinaryNodeChildren, getBinaryNodeChild,
     generateMessageIDV2, jidEncode, encodeSignedDeviceIdentity,
     generateWAMessageContent, generateForwardMessageContent, prepareWAMessageMedia,
@@ -26,49 +21,37 @@ let jidNormalizedUser, proto, getBinaryNodeChildren, getBinaryNodeChild,
     downloadContentFromMessage, generateWAMessageFromContent, jidDecode,
     generateWAMessage, toBuffer, getContentType, WAMessageStubType, getDevice;
 
-const initBaileys = async () => {
-    const b = await getBaileys();
-    jidNormalizedUser = b.jidNormalizedUser;
-    proto = b.proto;
-    getBinaryNodeChildren = b.getBinaryNodeChildren;
-    getBinaryNodeChild = b.getBinaryNodeChild;
-    generateMessageIDV2 = b.generateMessageIDV2;
-    jidEncode = b.jidEncode;
+async function _loadBaileys() {
+    if (jidNormalizedUser) return; // already loaded
+    const b = await import('@whiskeysockets/baileys');
+    jidNormalizedUser = b.jidNormalizedUser; proto = b.proto;
+    getBinaryNodeChildren = b.getBinaryNodeChildren; getBinaryNodeChild = b.getBinaryNodeChild;
+    generateMessageIDV2 = b.generateMessageIDV2; jidEncode = b.jidEncode;
     encodeSignedDeviceIdentity = b.encodeSignedDeviceIdentity;
     generateWAMessageContent = b.generateWAMessageContent;
     generateForwardMessageContent = b.generateForwardMessageContent;
-    prepareWAMessageMedia = b.prepareWAMessageMedia;
-    delay = b.delay;
-    areJidsSameUser = b.areJidsSameUser;
-    extractMessageContent = b.extractMessageContent;
+    prepareWAMessageMedia = b.prepareWAMessageMedia; delay = b.delay;
+    areJidsSameUser = b.areJidsSameUser; extractMessageContent = b.extractMessageContent;
     generateMessageID = b.generateMessageID;
     downloadContentFromMessage = b.downloadContentFromMessage;
     generateWAMessageFromContent = b.generateWAMessageFromContent;
-    jidDecode = b.jidDecode;
-    generateWAMessage = b.generateWAMessage;
-    toBuffer = b.toBuffer;
-    getContentType = b.getContentType;
-    WAMessageStubType = b.WAMessageStubType;
-    getDevice = b.getDevice;
-};
-
-// Kick off the import immediately so variables are ready before first message
-initBaileys().catch(e => console.error('❌ Failed to load Baileys:', e.message));
-
-
-
-// ✅ FIX: proto.fromObject() was removed in v7 — replaced with .create()
-// We patch this after baileys loads so proto is available
-initBaileys().then(() => {
-    if (proto?.WebMessageInfo) {
-        if (!proto.WebMessageInfo.fromObject) {
-            proto.WebMessageInfo.fromObject = (obj) => proto.WebMessageInfo.create(obj);
-        }
-        if (!proto.Message?.fromObject) {
-            if (proto.Message) proto.Message.fromObject = (obj) => proto.Message.create(obj);
-        }
+    jidDecode = b.jidDecode; generateWAMessage = b.generateWAMessage;
+    toBuffer = b.toBuffer; getContentType = b.getContentType;
+    WAMessageStubType = b.WAMessageStubType; getDevice = b.getDevice;
+    // ✅ Apply fromObject compat patch (removed in v7 proto)
+    if (proto?.WebMessageInfo && !proto.WebMessageInfo.fromObject) {
+        proto.WebMessageInfo.fromObject = (obj) => proto.WebMessageInfo.create(obj)
     }
-}).catch(() => {});
+    if (proto?.Message && !proto.Message.fromObject) {
+        proto.Message.fromObject = (obj) => proto.Message.create(obj)
+    }
+}
+// Load immediately — by the time messages arrive the promise will be resolved
+_loadBaileys().catch(e => console.error('❌ Baileys load failed:', e.message));
+
+
+
+// proto.fromObject patch applied inside _loadBaileys() after load
 
 // Safe message handler wrapper
 const safeMessageHandler = (originalHandler) => {
@@ -118,11 +101,15 @@ const messages = {
 async function GroupParticipantsUpdate(qasim, { id, participants, author, action }, store, groupCache) {
 	try {
 		function updateAdminStatus(participants, metadataParticipants, status) {
+			// ✅ FIX v7: p.id=LID, p.phoneNumber=PN JID (no p.lid). Match by raw number.
 			for (const participant of metadataParticipants) {
-				let id = jidNormalizedUser(participant.id);
-				if (participants.includes(id)) {
-					participant.admin = status;
-				}
+				const pLidNum = (participant.id          || '').split(':')[0].split('@')[0]
+				const pPnNum  = (participant.phoneNumber || '').split(':')[0].split('@')[0]
+				const matched = participants.some(jid => {
+					const jNum = jid.split(':')[0].split('@')[0]
+					return jNum === pLidNum || jNum === pPnNum
+				})
+				if (matched) participant.admin = status;
 			}
 		}
 		if (global.db?.groups?.[id] && store?.groupMetadata?.[id]) {
@@ -174,10 +161,7 @@ async function GroupParticipantsUpdate(qasim, { id, participants, author, action
 
 async function LoadDataBase(qasim, m) {
 	try {
-		// ✅ FIX: decodeJid is attached in Solving() — guard against it not being ready yet
-		const botNumber = typeof qasim.decodeJid === 'function'
-			? qasim.decodeJid(qasim.user.id)
-			: jidNormalizedUser(qasim.user.id);
+		const botNumber = await qasim.decodeJid(qasim.user.id);
 		let game = global.db.game || {};
 		let premium = global.db.premium || [];
 		let user = global.db.users[m.sender] || {};
@@ -294,11 +278,7 @@ async function LoadDataBase(qasim, m) {
 
 async function MessagesUpsert(qasim, message, store, groupCache) {
 	try {
-		// ✅ FIX: Ensure Baileys ESM exports are loaded before processing messages
-		await initBaileys();
-		let botNumber = typeof qasim.decodeJid === 'function'
-			? qasim.decodeJid(qasim.user.id)
-			: jidNormalizedUser(qasim.user.id);
+		let botNumber = await qasim.decodeJid(qasim.user.id);
 		const msg = message.messages[0];
 		const remoteJid = msg.key.remoteJid;
 		store.messages[remoteJid] ??= {};
@@ -317,14 +297,7 @@ async function MessagesUpsert(qasim, message, store, groupCache) {
 		if (!store.groupMetadata || Object.keys(store.groupMetadata).length === 0) store.groupMetadata ??= await qasim.groupFetchAllParticipating().catch(e => ({}));
 		const type = msg.message ? (getContentType(msg.message) || Object.keys(msg.message)[0]) : '';
 		const m = await Serialize(qasim, msg, store, groupCache)
-		// ✅ FIX: Wrap main() call — syntax errors in plugin files show up here.
-		// The full stack trace will now tell you exactly which plugin file is broken.
-		try {
-			require('../main')(qasim, m, msg, store, groupCache);
-		} catch (pluginErr) {
-			console.log(require('chalk').red('⚠️ Plugin/main error:'), pluginErr.message);
-			if (pluginErr.stack) console.log(require('chalk').yellow(pluginErr.stack));
-		}
+		require('../main')(qasim, m, msg, store, groupCache);
 		if (db?.set?.[botNumber]?.readsw && msg.key.remoteJid === 'status@broadcast') {
 			await qasim.readMessages([msg.key]);
 			if (/protocolMessage/i.test(type)) await qasim.sendFromOwner(global.owner, 'Status dari @' + msg.key.participant.split('@')[0] + ' Telah dihapus', msg, { mentions: [msg.key.participant] });
@@ -343,11 +316,7 @@ await qasim.sendFromOwner(global.owner, `Viewing story from @${msg.key.participa
 }
 		}
 	} catch (e) {
-		// ✅ FIX: Don't rethrow — one bad plugin/message shouldn't kill all message processing.
-		// The "Missing catch or finally after try" error comes from a syntax error in a plugin
-		// file loaded via require('../main'). Log the full stack so you can find which file it is.
-		console.log(require('chalk').red('⚠️ MessagesUpsert error:'), e.message);
-		if (e.stack) console.log(require('chalk').yellow(e.stack));
+		throw e;
 	}
 }
 
@@ -359,9 +328,7 @@ async function Solving(qasim, store) {
 		if (/:\d+@/gi.test(jid)) {
 			let decode = jidDecode(jid) || {}
 			return decode.user && decode.server && decode.user + '@' + decode.server || jid
-		}
-		// ✅ FIX: v7 LID JIDs end in @lid — pass them through as-is (don't strip @lid)
-		return jid
+		} else return jid
 	}
 	
 	qasim.getName = (jid, withoutContact  = false) => {
@@ -461,8 +428,7 @@ async function Solving(qasim, store) {
 	}
 	
 	qasim.sendGroupInvite = async (jid, participant, inviteCode, inviteExpiration, groupName = 'Unknown Subject', caption = 'Invitation to join my WhatsApp group', jpegThumbnail = null, options = {}) => {
-		// ✅ FIX: proto.Message.fromObject removed in v7 — use .create()
-		const msg = proto.Message.create({
+		const msg = proto.Message.fromObject({
 			groupInviteMessage: {
 				inviteCode,
 				inviteExpiration: parseInt(inviteExpiration) || + new Date(new Date + (3 * 86400000)),
@@ -537,8 +503,7 @@ async function Solving(qasim, store) {
 		if (m.isGroup) apb.participant = m.sender;
 		qasim.ev.emit('messages.upsert', {
 			...m,
-			// ✅ FIX: proto.fromObject removed in v7 — use .create()
-			messages: [proto.WebMessageInfo.create(apb)],
+			messages: [proto.WebMessageInfo.fromObject(apb)],
 			type: 'append'
 		});
 	}
@@ -810,19 +775,8 @@ async function Solving(qasim, store) {
 */
 
 async function Serialize(qasim, msg, store, groupCache) {
-	// ✅ FIX: Ensure baileys exports are ready (needed for getContentType, extractMessageContent etc)
-	await initBaileys();
-	// ✅ FIX: v7 — user.lid is now a real field from creds.me.lid — guard it safely
-	// ✅ FIX v7: Derive bot identifiers robustly.
-	// qasim.user.id  may be a PN JID  e.g. "265993702468@s.whatsapp.net"
-	//                or a LID         e.g. "145917739024404:93@lid"
-	// qasim.user.lid is the LID       e.g. "145917739024404:93@lid" (may have :device suffix)
-	const botNumber = qasim.decodeJid(qasim.user.id)
-	// Build botLid: prefer explicit user.lid, fall back to user.id if it IS a lid
-	const _rawLid = qasim.user?.lid || (qasim.user?.id?.includes('@lid') ? qasim.user.id : null)
-	const botLid = _rawLid ? qasim.decodeJid(_rawLid) : null
-	// Also keep the raw phone number so we can match against any JID format
-	const _botPhone = botNumber.split(':')[0].split('@')[0]
+	const botLid = qasim.decodeJid(qasim.user.lid);
+	const botNumber = qasim.decodeJid(qasim.user.id);
 	const m = { ...msg };
 	if (!m) return m
 	if (m.key) {
@@ -842,33 +796,24 @@ async function Serialize(qasim, msg, store, groupCache) {
 			}
 			m.metadata = metadata
 			m.admins = m.metadata.participants ? (m.metadata.participants.reduce((a, b) => (b.admin ? a.push({ id: b.id, admin: b.admin }) : [...a]) && a, [])) : []
-			// ✅ FIX v7: isAdmin — match by raw phone number to bypass LID/PN format differences
+			// ✅ FIX v7: participants use p.id (LID) + p.phoneNumber (PN JID) — no p.lid field
 			const _senderNum = m.sender?.split(':')[0].split('@')[0]
 			m.isAdmin = !!m.metadata.participants?.find((p) => {
 				if (!p.admin) return false
-				const pNum = p.id?.split(':')[0].split('@')[0]
-				const pLidNum = p.lid?.split(':')[0].split('@')[0]
-				return pNum === _senderNum || pLidNum === _senderNum
+				const pLidNum  = (p.id          || '').split(':')[0].split('@')[0]
+				const pPnNum   = (p.phoneNumber || '').split(':')[0].split('@')[0]
+				return pLidNum === _senderNum || pPnNum === _senderNum
 			}) || false
 			m.participant = m.key.participant
-			// ✅ FIX v7: isBotAdmin — exhaustive LID/PN matching
-			// In v7, group participants are stored as LIDs. The bot's own entry may be
-			// stored by LID, PN, or have a separate .lid field. We check every combination.
-			const _botLidClean = botLid ? botLid.split(':')[0].split('@')[0] : null
-			const _botPnClean = botNumber ? botNumber.split(':')[0].split('@')[0] : null
+			// ✅ FIX v7: p.id=LID, p.phoneNumber=PN JID (no p.lid field in v7 store)
+			const _botPnNum  = botNumber?.split(':')[0].split('@')[0]  // e.g. "265993702468"
+			const _botLidNum = botLid?.split(':')[0].split('@')[0]     // e.g. "145917739024404"
 			m.isBotAdmin = !!m.metadata.participants?.find((p) => {
 				if (!p.admin) return false
-				// Extract raw number from whatever format this participant is stored as
-				const pNum = p.id?.split(':')[0].split('@')[0]
-				const pLidNum = p.lid?.split(':')[0].split('@')[0]
-				// Match bot's PN number against participant id or lid number
-				if (_botPnClean && (pNum === _botPnClean || pLidNum === _botPnClean)) return true
-				// Match bot's LID number against participant id or lid number
-				if (_botLidClean && (pNum === _botLidClean || pLidNum === _botLidClean)) return true
-				// Full JID exact match fallbacks
-				if (botNumber && (p.id === botNumber || p.lid === botNumber)) return true
-				if (botLid && (p.id === botLid || p.lid === botLid)) return true
-				return false
+				const pLidNum = (p.id          || '').split(':')[0].split('@')[0]
+				const pPnNum  = (p.phoneNumber || '').split(':')[0].split('@')[0]
+				return (_botLidNum && pLidNum === _botLidNum) ||
+				       (_botPnNum  && pPnNum  === _botPnNum)
 			}) || false
 		}
 	}
@@ -934,8 +879,7 @@ async function Serialize(qasim, msg, store, groupCache) {
 					m.quoted.isAnimated = m?.quoted?.msg?.isAnimated || false
 				}
 			}
-			// ✅ FIX: proto.fromObject removed in v7 — use .create() directly
-			m.quoted.fakeObj = proto.WebMessageInfo.create({
+			m.quoted.fakeObj = proto.WebMessageInfo.fromObject({
 				key: {
 					remoteJid: m.quoted.chat,
 					fromMe: m.quoted.fromMe,
@@ -960,8 +904,7 @@ async function Serialize(qasim, msg, store, groupCache) {
 	
 	m.download = () => qasim.downloadMediaMessage(m)
 	
-	// ✅ FIX: proto.toObject/fromObject removed in v7 — use create() with spread
-	m.copy = () => Serialize(qasim, proto.WebMessageInfo.create({ ...m }))
+	m.copy = () => Serialize(qasim, proto.WebMessageInfo.fromObject(proto.WebMessageInfo.toObject(m)))
 	
 	m.react = (u) => qasim.sendMessage(m.chat, { react: { text: u, key: m.key }})
 	
